@@ -1,0 +1,130 @@
+#!/bin/bash
+########################################################################
+# PullPackage.sh - Script to pull a package installation or update
+# script from a software repository and execute it.
+# Copyright (c) 2021-2022 Oliver Kreylos
+########################################################################
+
+# Set and display PullPackage's version number
+export PULLPACKAGE_VERSION=10.0
+echo "PullPackage version ${PULLPACKAGE_VERSION}"
+
+# Check if user wants to force an update
+FORCE=0
+if [[ $1 == "--force" || $1 == "-f" ]]; then
+	FORCE=1
+	shift
+fi
+
+# Construct the name of the package script
+PACKAGE=$1
+if [[ $# -ge 2 ]]; then
+	VERSION=$2
+else
+	VERSION=current
+fi
+PACKAGESCRIPT=Build${PACKAGE}-${VERSION}.sh
+
+########################################################################
+# Set up package build environment
+########################################################################
+
+# Location of the package repository
+export REPOSITORY=http://vroom.library.ucdavis.edu/Software
+
+# Root directory in which to build packages
+export BUILDROOT=${HOME}/src/PullPackages
+
+# Root directory in which to install packages
+export ROOTINSTALLDIR=/opt
+
+# Directory to put symlinks for all created executables
+export SYMLINKBINDIR=/usr/local/bin
+
+# Determine the number of CPUs on the host computer
+export NUM_CPUS=$(grep processor /proc/cpuinfo | wc -l)
+if [[ $? -ne 0 ]]; then
+	echo -e "\033[0;31mUnable to determine the number of CPUs on this PC\033[0m"
+	exit 1
+fi
+
+# Prepare the build environment
+mkdir -p "${BUILDROOT}" && mkdir -p "${BUILDROOT}/Scripts" && mkdir -p "${BUILDROOT}/CurrentVersions" && mkdir -p "${BUILDROOT}/Configs" && mkdir -p "${BUILDROOT}/PostInstalls"
+if [[ $? -ne 0 ]]; then
+	echo -e "\033[0;31mUnable to create build root directory ${BUILDROOT}\033[0m"
+	rm -r ${BUILDROOT}
+	exit 2
+fi
+cd "${BUILDROOT}"
+
+# Determine the type of Linux installation and the command to install OS packages
+LINUXDISTRO_ID=$(sed -n "s/^ID=\(.*\)$/\1/p" /etc/os-release)
+LINUXDISTRO_ID=$(sed "s/^\(\"\)\(.*\)\1\$/\2/g" <<<"$LINUXDISTRO_ID")
+export LINUXDISTRO=
+if [[ "${LINUXDISTRO_ID}" == "fedora" || "${LINUXDISTRO_ID}" == "centos" || "${LINUXDISTRO_ID}" == "rhel" ]]; then
+	export LINUXDISTRO=Fedora
+	export PACKAGE_INSTALL_CMD="dnf install"
+elif [[ "${LINUXDISTRO_ID}" == "ubuntu" || "${LINUXDISTRO_ID}" == "linuxmint" ]]; then
+	export LINUXDISTRO=Ubuntu
+	export PACKAGE_INSTALL_CMD="apt-get install"
+else
+	export LINUXDISTRO=Unknown
+fi
+
+# Check if some version of the requested package is already installed
+export CURRENTVERSION=
+if [[ -f "CurrentVersions/${PACKAGE}" ]]; then
+	export CURRENTVERSION=$(<"CurrentVersions/${PACKAGE}")
+fi
+
+########################################################################
+# Pull the requested package
+########################################################################
+
+# Check if update is forced or the requested version is different from the already-installed version
+if [[ ${FORCE} != 0 || "${VERSION}" != "${CURRENTVERSION}" ]]; then
+	# Download the package script
+	wget -q "${REPOSITORY}/PullPackages/${PACKAGESCRIPT}"
+	if [[ $? -ne 0 ]]; then
+		echo -e "\033[0;31mUnable to download build script for package ${PACKAGE}, version ${VERSION}\033[0m"
+		exit 3
+	fi
+	
+	# Ask for admin password now instead of later, so user can go have a cup of coffee
+	echo -e "\033[0;32mPlease enter your administrator password to install package ${PACKAGE}, version ${VERSION}\033[0m"
+	sudo /bin/bash -c 'date > /dev/null'
+	
+	# Execute the downloaded script
+	/bin/bash "${PACKAGESCRIPT}"
+	if [[ $? -ne 0 ]]; then
+		echo -e "\033[0;31mUnable to install package ${PACKAGE}, version ${VERSION}\033[0m"
+		rm "${PACKAGESCRIPT}"
+		exit 4
+	fi
+	
+	# Find out which version was actually installed
+	if [[ -f "CurrentVersions/${PACKAGE}" ]]; then
+		VERSION=$(<"CurrentVersions/${PACKAGE}")
+	fi
+	
+	# Execute the package's post-installation scripts
+	if [[ -d "PostInstalls/${PACKAGE}" ]]; then
+		shopt -s nullglob
+		cd "PostInstalls/${PACKAGE}" ; POSTINSTALLSCRIPTS=(*) ; cd ../..
+		for SCRIPT in "${POSTINSTALLSCRIPTS[@]}"; do
+			/bin/bash "PostInstalls/${PACKAGE}/${SCRIPT}" "${CURRENTVERSION}" "${VERSION}"
+			if [[ $? -ne 0 ]]; then
+				echo -e "\033[0;31mUnable to execute ${PACKAGE}'s post-installation scripts\033[0m"
+				rm "${PACKAGESCRIPT}"
+				exit 5
+			fi
+		done
+	fi
+	
+	echo -e "\033[0;32mPackage ${PACKAGE}, version ${VERSION}, successfully installed\033[0m"
+	
+	# Clean up
+	rm "${PACKAGESCRIPT}"
+else
+	echo -e "\033[0;32mPackage ${PACKAGE}, version ${CURRENTVERSION}, already installed\033[0m"
+fi
